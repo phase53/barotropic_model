@@ -1,0 +1,307 @@
+!-----------------------------------------------------------------------  
+! Barotropic Model.
+! Copyright(c) 2025 Shuya Akamatsu.
+!
+!     This model uses ISPACK-3.2.2 for spherical harmonic transforms in 
+! spectral-space computations.
+! 
+! History: 2025/07/07 Akamatsu, created.
+!          2025/11/23 Akamatsu, last fixed.
+!-----------------------------------------------------------------------  
+MODULE GLOBALS
+  USE ISO_C_BINDING
+!----初期パラメタ-------------------------------------------------------
+  CHARACTER(128),PARAMETER :: DATPAS='../dat/' !データディレクトリパス
+  CHARACTER(128),PARAMETER :: FNZETS='ZETA_S' !出力ファイル名
+  CHARACTER(128),PARAMETER :: ADDON='.dat' !拡張子
+  CHARACTER(128),PARAMETER :: FNLATD='LAT.dat'
+  INTEGER(8),PARAMETER :: JM=512 !緯度方向格子点数
+  INTEGER(8),PARAMETER :: IM=1024 !経度方向格子点数
+  INTEGER(8),PARAMETER :: NN=341 !切断波数
+  INTEGER(8),PARAMETER :: MM=NN
+  INTEGER(8),PARAMETER :: NM=NN+1
+  INTEGER(8),PARAMETER :: NT=NN
+  INTEGER(8),PARAMETER :: DAY=100 !計算日数
+  INTEGER(8),PARAMETER :: DAYSTP=50 !１日あたりのステップ数
+  INTEGER(8),PARAMETER :: STEP=DAY*DAYSTP !時間ステップ数
+  REAL(8),PARAMETER :: PI=3.141592653589793D0
+  REAL(8),PARAMETER :: VSCSTY=0.000003D0 !粘性係数
+  REAL(8),PARAMETER :: H=1._8/DAYSTP
+  REAL(8),PARAMETER :: IZP=0._8 !初期渦Aの中心経度
+  REAL(8),PARAMETER :: IZM=PI !初期渦Bの中心経度
+  REAL(8),PARAMETER :: JZP=PI/3._8 !初期渦Aの中心緯度
+  REAL(8),PARAMETER :: JZM=PI/3._8 !初期渦Bの中心緯度
+  REAL(8),PARAMETER :: BETA = 10._8 !初期渦の広がり
+!----初期値ファイルを指定する場合，ここにfalenameを入力-----------------
+  CHARACTER(128),PARAMETER :: INZETS='hoge' !順圧渦度場  
+  LOGICAL :: RD=.FALSE. !初期値ファイルを指定した場合, .TRUE. とする
+  INTEGER(8),PARAMETER :: SSTEP=0 !計算開始日数(デフォルト：0)
+!----ISPACK用-----------------------------------------------------------
+  REAL(8),SAVE :: T(IM*3/2)
+  REAL(8),SAVE :: R(((MM+1)*(2*NM-MM-1)+1)/4*3+(2*NM-MM)*(MM+1)/2+MM+1)
+  REAL(8),SAVE :: C((2*NT-MM+1)*(MM+1))
+  REAL(8),SAVE :: D(NT+1+MM*(2*NT-MM+1),2)
+  REAL(8),DIMENSION(:,:),POINTER :: P
+  REAL(8),DIMENSION(:),POINTER :: W
+  INTEGER(8),SAVE :: IT(IM/2) 
+  INTEGER(8),SAVE :: JC(MM*(2*NM-MM-1)/16+MM)
+  INTEGER(8),SAVE :: L   
+!----データ配列---------------------------------------------------------
+  REAL(8),DIMENSION(:,:),POINTER :: GZETAI
+  REAL(8),DIMENSION(:,:),POINTER :: GZETA
+  REAL(8),DIMENSION(:,:),POINTER :: GU
+  REAL(8),DIMENSION(:,:),POINTER :: GV
+  REAL(8),DIMENSION(:,:),POINTER :: GDPHI
+  REAL(8),DIMENSION(:,:),POINTER :: GDTHET
+  REAL(8),DIMENSION(:,:),POINTER :: MID
+  REAL(8),SAVE :: SZETAI((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: SU((2*NN+3-MM)*MM+NN+2)
+  REAL(8),SAVE :: SV((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: SDPHI((2*NN+3-MM)*MM+NN+2)
+  REAL(8),SAVE :: SDTHET((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: SPSI((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: VAL((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: K1((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: K2((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: K3((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: K4((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: TMP1((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: TMP2((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: TMP3((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: RSLVNT((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: A((2*NN+1-MM)*MM+NN+1)
+  REAL(8),SAVE :: LAT(JM)
+  REAL(8),SAVE :: LON(IM) 
+  REAL(8),SAVE :: INDP
+  REAL(8),SAVE :: INDM
+  REAL(8),SAVE :: THALF
+  INTEGER(8),SAVE :: TMP
+  INTEGER(8),SAVE :: I
+  INTEGER(8),SAVE :: J
+  INTEGER(8),SAVE :: N
+  INTEGER(8),SAVE :: M
+  CHARACTER(99) :: NOWDAY
+!----ポインタ用---------------------------------------------------------
+  TYPE(C_PTR) :: PP
+  TYPE(C_PTR) :: PW
+  TYPE(C_PTR) :: PZETAI
+  TYPE(C_PTR) :: PZETA
+  TYPE(C_PTR) :: PU
+  TYPE(C_PTR) :: PV
+  TYPE(C_PTR) :: PDPHI
+  TYPE(C_PTR) :: PDTHET
+  TYPE(C_PTR) :: PMID
+END MODULE GLOBALS
+
+MODULE SUBPROGS
+  USE GLOBALS
+  USE ISO_C_BINDING
+  IMPLICIT NONE
+CONTAINS
+  SUBROUTINE RK4
+    !$OMP PARALLEL
+    !$OMP DO
+    DO I=1,(2*NN+1-MM)*MM+NN+1
+      VAL(I) = SZETAI(I)
+    ENDDO
+    !$OMP END DO
+    !$OMP END PARALLEL
+    DO TMP = SSTEP,STEP
+      IF(MOD(TMP,DAYSTP)<0.0001) THEN
+        WRITE(NOWDAY,'(I4.4)') INT(DBLE(TMP)/DAYSTP)
+        OPEN(UNIT=11,&
+        FILE=TRIM(DATPAS)//TRIM(FNZETS)//TRIM(NOWDAY)//TRIM(ADDON),&
+        FORM='UNFORMATTED',ACCESS='DIRECT',&
+        RECL=((2*NN+1-MM)*MM+NN+1)*8,CONVERT='BIG_ENDIAN',&
+        STATUS='REPLACE')
+        WRITE(11,REC=1) VAL(:)
+        CLOSE(11)
+      ENDIF
+      WRITE(*,*) 'NOW STEP is',TMP
+      !１段階目
+      CALL RHS(VAL(:),K1(:))
+      !$OMP PARALLEL
+      !$OMP DO
+      DO I=1,(2*NN+1-MM)*MM+NN+1
+        K1(I)=H*K1(I)
+        TMP1(I)=RSLVNT(I)*(VAL(I)+0.5D0*K1(I))
+      ENDDO
+      !$OMP END DO
+      !$OMP END PARALLEL
+      !２段階目
+      CALL RHS(TMP1(:),K2(:))
+      !$OMP PARALLEL
+      !$OMP DO
+      DO I=1,(2*NN+1-MM)*MM+NN+1
+        K2(I)=H*K2(I)
+        TMP2(I)=RSLVNT(I)*VAL(I)+0.5D0*K2(I)
+      ENDDO
+      !$OMP END DO
+      !$OMP END PARALLEL
+      !３段階目
+      CALL RHS(TMP2(:),K3(:))
+      !$OMP PARALLEL
+      !$OMP DO
+      DO I=1,(2*NN+1-MM)*MM+NN+1
+        K3(I)=H*K3(I)
+        TMP3(I)=RSLVNT(I)*(RSLVNT(I)*VAL(I)+K3(I))
+      ENDDO
+      !$OMP END DO
+      !$OMP END PARALLEL
+      !４段階目
+      CALL RHS(TMP3(:),K4(:))
+      !$OMP PARALLEL
+      !$OMP DO
+      DO I=1,(2*NN+1-MM)*MM+NN+1
+        K4(I)=H*K4(I)
+
+        VAL(I)=RSLVNT(I)*(RSLVNT(I)*(VAL(I)+K1(I)/6._8)+(K2(I)+K3(I))/3._8)+K4(I)/6._8
+      ENDDO
+      !$OMP END DO
+      !$OMP END PARALLEL
+      CLOSE(11)
+    ENDDO
+  END SUBROUTINE RK4
+
+  SUBROUTINE RHS(SZETA,SZETAO)
+    REAL(8),INTENT(IN) :: SZETA((2*NN+1-MM)*MM+NN+1)
+    REAL(8),INTENT(OUT) :: SZETAO((2*NN+1-MM)*MM+NN+1)
+
+    CALL SXCLAP(MM,NT,SZETA,SPSI,D,2_8)
+
+    CALL SXCS2Y(MM,NT,SPSI,SU,C)
+    CALL SXTS2G(MM,NM,NN+1,IM,JM,SU,GU,IT,T,P,R,JC,W,0_8)
+    GU=-GU
+    
+    CALL SXCS2X(MM,NT,SPSI,SV)
+    CALL SXTS2G(MM,NM,NN,IM,JM,SV,GV,IT,T,P,R,JC,W,0_8)
+
+    CALL SXCS2X(MM,NT,SZETA,SDTHET)
+    CALL SXTS2G(MM,NM,NN,IM,JM,SDTHET,GDTHET,IT,T,P,R,JC,W,2_8)
+
+    CALL SXCS2Y(MM,NT,SZETA,SDPHI,C)
+    CALL SXTS2G(MM,NM,NN+1,IM,JM,SDPHI,GDPHI,IT,T,P,R,JC,W,2_8)
+
+    MID=-(GU*GDTHET+GV*GDPHI)
+    CALL SXTG2S(MM,NM,NN,IM,JM,SZETAO,MID,IT,T,P,R,JC,W,0_8)
+  END SUBROUTINE RHS
+
+  SUBROUTINE MKRSLV
+    DO I=1_8, (2*NN+1-MM)*MM+NN+1
+      CALL SXL2NM(NN,I,N,M)
+      A(I)=-N*(N+1._8)*VSCSTY
+    ENDDO
+    THALF=0.5D0*H 
+    DO I=1_8, (2*NN+1-MM)*MM+NN+1
+      RSLVNT(I) = EXP(A(I)*THALF)
+    ENDDO
+  END SUBROUTINE MKRSLV
+
+  SUBROUTINE MKLATD
+    OPEN(UNIT=10,FILE=TRIM(DATPAS)//TRIM(FNLATD),FORM='UNFORMATTED',&
+    ACCESS='DIRECT',RECL=JM*8,&
+    CONVERT='BIG_ENDIAN',STATUS='REPLACE')
+    WRITE(10,REC=1)  LAT(:)
+    CLOSE(10)
+  END SUBROUTINE MKLATD
+  
+  SUBROUTINE READY
+    CALL MXALLC(PP,JM/2*(2*MM+5))
+    CALL MXALLC(PW,JM*IM)
+    CALL MXALLC(PZETAI,JM*IM)
+    CALL MXALLC(PZETA,JM*IM)
+    CALL MXALLC(PU,JM*IM)
+    CALL MXALLC(PV,JM*IM)
+    CALL MXALLC(PDPHI,JM*IM)
+    CALL MXALLC(PDTHET,JM*IM)
+    CALL MXALLC(PMID,JM*IM)
+    CALL C_F_POINTER(PP,P,[JM/2,2*MM+5])
+    CALL C_F_POINTER(PW, W, [IM*JM])
+    CALL C_F_POINTER(PZETAI,GZETAI,[IM,JM])
+    CALL C_F_POINTER(PZETA,GZETA,[IM,JM])
+    CALL C_F_POINTER(PU,GU,[IM,JM])
+    CALL C_F_POINTER(PV,GV,[IM,JM])
+    CALL C_F_POINTER(PDPHI,GDPHI,[IM,JM])
+    CALL C_F_POINTER(PDTHET,GDTHET,[IM,JM])
+    CALL C_F_POINTER(PMID,MID,[IM,JM])
+
+    CALL SXINI1(MM,NM,IM,IT,T,R)
+    CALL SXINI2(MM,NM,JM,1_8,P,R,JC)
+    CALL SXINIC(MM,NT,C)
+    CALL SXINID(MM,NT,D)
+
+    DO I=1, JM/2_8
+      LAT(JM/2_8+I)=P(I,1)
+      LAT(JM/2_8-I+1)=-P(I,1)
+    ENDDO
+    LAT(:) = ASIN(LAT(:))
+    DO J=1, IM
+      LON(J)=(J-1._8)*2._8*PI/IM
+    ENDDO
+  END SUBROUTINE READY
+
+  SUBROUTINE MKINIT
+    DO J=1, JM
+      DO I = 1, IM
+        INDP=SIN(LAT(J))*SIN(JZP)+SQRT((1._8-SIN(LAT(J))**2)*&
+        (1._8-SIN(JZP)**2))*COS(LON(I)-IZP)
+        INDM=SIN(LAT(J))*SIN(JZM)+SQRT((1._8-SIN(LAT(J))**2)*&
+        (1._8-SIN(JZM)**2))*COS(LON(I)-IZM)
+        GZETAI(I,J)=&
+        (EXP(BETA*(INDP-1._8))-(1._8-EXP(-2._8*BETA))/(2._8*BETA))+&
+        (EXP(BETA*(INDM-1._8))-(1._8-EXP(-2._8*BETA))/(2._8*BETA))
+      ENDDO
+    ENDDO
+
+    CALL SXTG2S(MM,NM,NT,IM,JM,SZETAI,GZETAI,IT,T,P,R,JC,W,0_8)
+  END SUBROUTINE MKINIT 
+
+  SUBROUTINE RDDATA
+    OPEN(UNIT=21,FILE=TRIM(DATPAS)//TRIM(INZETS),FORM='UNFORMATTED',&
+    ACCESS='DIRECT',RECL=((2*NN+1-MM)*MM+NN+1)*8,&
+    CONVERT='BIG_ENDIAN',STATUS='OLD')
+    READ(21,REC=1) SZETAI(:)
+    CLOSE(21)
+  END SUBROUTINE RDDATA
+
+
+  SUBROUTINE BYE
+    CALL MXFREE(PP)
+    CALL MXFREE(PW)
+    CALL MXFREE(PZETA)
+    CALL MXFREE(PZETAI)
+    CALL MXFREE(PU)
+    CALL MXFREE(PV)
+    CALL MXFREE(PDPHI)
+    CALL MXFREE(PDTHET)
+    CALL MXFREE(PMID)
+  END SUBROUTINE BYE
+
+  SUBROUTINE WRTDAT
+    WRITE(*,*) '--------Model Settings--------'
+    WRITE(*,*) 'Latitude grid points =',JM
+    WRITE(*,*) 'longitude grid points =',IM
+    WRITE(*,*) 'truncation wavenumber =',NN
+    WRITE(*,*) '--Output file name (../dat/)--'
+    WRITE(*,*) 'vorticity spectrum datafile : ',FNZETS
+    WRITE(*,*) 'gaussian latitude datafile : ',FNLATD
+  END SUBROUTINE WRTDAT
+END MODULE SUBPROGS
+
+PROGRAM MAIN
+  USE SUBPROGS
+  USE GLOBALS
+  IMPLICIT NONE
+
+  CALL WRTDAT
+  CALL READY
+  IF(RD) THEN
+    CALL RDDATA
+  ELSE
+    CALL MKINIT
+  ENDIF
+  CALL MKLATD
+  CALL MKRSLV
+  CALL RK4
+  CALL BYE
+END PROGRAM MAIN
